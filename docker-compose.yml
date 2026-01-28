@@ -1,0 +1,25 @@
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: videx
+      POSTGRES_PASSWORD: videx
+      POSTGRES_DB: videx
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  app:
+    build: .
+    ports:
+      - "3001:3001"
+    environment:
+      DATABASE_URL: postgres://videx:videx@db:5432/videx
+    depends_on:
+      - db
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
