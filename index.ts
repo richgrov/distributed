@@ -13,9 +13,9 @@ await sql`
     name TEXT NOT NULL,
     email TEXT UNIQUE NOT NULL,
     password TEXT NOT NULL,
-    streetAddress TEXT NOT NULL,
-    createdAt TIMESTAMP NOT NULL,
-    updatedAt TIMESTAMP NOT NULL
+    street_address TEXT NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL
   )
 `;
 
@@ -25,13 +25,13 @@ await sql`
     name TEXT NOT NULL,
     publisher TEXT NOT NULL,
     year INTEGER NOT NULL,
-    gamingSystem TEXT NOT NULL,
+    gaming_system TEXT NOT NULL,
     condition TEXT NOT NULL CHECK(condition IN ('mint', 'good', 'fair', 'poor')),
-    previousOwners INTEGER,
-    ownerId INTEGER NOT NULL,
-    createdAt TIMESTAMP NOT NULL,
-    updatedAt TIMESTAMP NOT NULL,
-    FOREIGN KEY (ownerId) REFERENCES users(id) ON DELETE CASCADE
+    previous_owners INTEGER,
+    owner_id INTEGER NOT NULL,
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    FOREIGN KEY (owner_id) REFERENCES users(id) ON DELETE CASCADE
   )
 `;
 
@@ -79,9 +79,9 @@ function formatUserResponse(user: any) {
     id: user.id,
     name: user.name,
     email: user.email,
-    streetAddress: user.streetAddress,
-    createdAt: user.createdAt,
-    updatedAt: user.updatedAt,
+    streetAddress: user.street_address,
+    createdAt: user.created_at,
+    updatedAt: user.updated_at,
     _links: createUserLinks(user.id),
   };
 }
@@ -92,13 +92,13 @@ function formatGameResponse(game: any) {
     name: game.name,
     publisher: game.publisher,
     year: game.year,
-    gamingSystem: game.gamingSystem,
+    gamingSystem: game.gaming_system,
     condition: game.condition,
-    previousOwners: game.previousOwners,
-    ownerId: game.ownerId,
-    createdAt: game.createdAt,
-    updatedAt: game.updatedAt,
-    _links: createGameLinks(game.id, game.ownerId),
+    previousOwners: game.previous_owners,
+    ownerId: game.owner_id,
+    createdAt: game.created_at,
+    updatedAt: game.updated_at,
+    _links: createGameLinks(game.id, game.owner_id),
   };
 }
 
@@ -180,7 +180,7 @@ const server = Bun.serve({
           const now = new Date();
 
           const result = await sql`
-            INSERT INTO users (name, email, password, streetAddress, createdAt, updatedAt)
+            INSERT INTO users (name, email, password, street_address, created_at, updated_at)
             VALUES (${name}, ${email}, ${hashedPassword}, ${streetAddress}, ${now}, ${now})
             RETURNING *
           `;
@@ -231,13 +231,13 @@ const server = Bun.serve({
             return errorResponse(400, validation.error.message);
           }
 
-          const updates: any = { updatedAt: new Date() };
+          const updates: any = { updated_at: new Date() };
 
           if (validation.data.name !== undefined) {
             updates.name = validation.data.name;
           }
           if (validation.data.streetAddress !== undefined) {
-            updates.streetAddress = validation.data.streetAddress;
+            updates.street_address = validation.data.streetAddress;
           }
 
           if (Object.keys(updates).length === 1) {
@@ -329,7 +329,7 @@ const server = Bun.serve({
           const now = new Date();
 
           const result = await sql`
-            INSERT INTO games (name, publisher, year, gamingSystem, condition, previousOwners, ownerId, createdAt, updatedAt)
+            INSERT INTO games (name, publisher, year, gaming_system, condition, previous_owners, owner_id, created_at, updated_at)
             VALUES (${name}, ${publisher}, ${year}, ${gamingSystem}, ${condition}, ${previousOwners ?? null}, ${ownerId}, ${now}, ${now})
             RETURNING *
           `;
@@ -370,7 +370,7 @@ const server = Bun.serve({
 
           const game = games[0];
 
-          if (game.ownerId !== authenticatedUserId) {
+          if (game.owner_id !== authenticatedUserId) {
             return errorResponse(403, "Forbidden: You can only update your own games");
           }
 
@@ -387,8 +387,8 @@ const server = Bun.serve({
 
           const updatedGames = await sql`
             UPDATE games
-            SET name = ${name}, publisher = ${publisher}, year = ${year}, gamingSystem = ${gamingSystem},
-                condition = ${condition}, previousOwners = ${previousOwners ?? null}, updatedAt = ${now}
+            SET name = ${name}, publisher = ${publisher}, year = ${year}, gaming_system = ${gamingSystem},
+                condition = ${condition}, previous_owners = ${previousOwners ?? null}, updated_at = ${now}
             WHERE id = ${gameId}
             RETURNING *
           `;
@@ -413,7 +413,7 @@ const server = Bun.serve({
 
           const game = games[0];
 
-          if (game.ownerId !== authenticatedUserId) {
+          if (game.owner_id !== authenticatedUserId) {
             return errorResponse(403, "Forbidden: You can only update your own games");
           }
 
@@ -436,13 +436,13 @@ const server = Bun.serve({
             updates.year = validation.data.year;
           }
           if (validation.data.gamingSystem !== undefined) {
-            updates.gamingSystem = validation.data.gamingSystem;
+            updates.gaming_system = validation.data.gamingSystem;
           }
           if (validation.data.condition !== undefined) {
             updates.condition = validation.data.condition;
           }
           if (validation.data.previousOwners !== undefined) {
-            updates.previousOwners = validation.data.previousOwners;
+            updates.previous_owners = validation.data.previousOwners;
           }
 
           if (Object.keys(updates).length === 1) {
@@ -475,7 +475,7 @@ const server = Bun.serve({
 
         const game = games[0];
 
-        if (game.ownerId !== authenticatedUserId) {
+        if (game.owner_id !== authenticatedUserId) {
           return errorResponse(403, "Forbidden: You can only delete your own games");
         }
 
