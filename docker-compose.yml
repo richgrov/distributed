@@ -13,6 +13,7 @@ services:
     build: .
     environment:
       DATABASE_URL: postgres://videx:videx@db:5432/videx
+      JWT_SECRET: ${JWT_SECRET:dev}
     depends_on:
       - db
     restart: unless-stopped
@@ -21,6 +22,7 @@ services:
     build: .
     environment:
       DATABASE_URL: postgres://videx:videx@db:5432/videx
+      JWT_SECRET: ${JWT_SECRET:dev}
     depends_on:
       - db
     restart: unless-stopped

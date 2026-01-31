@@ -1,11 +1,19 @@
 import { sql } from "bun";
+import jwt from "jsonwebtoken";
 import {
   UserInputSchema,
   LoginInputSchema,
   GameInputSchema,
   UserPatchSchema,
   GamePatchSchema,
+  TradeOfferInputSchema,
+  TradeOfferUpdateSchema,
 } from "./schemas";
+
+const JWT_SECRET = process.env.JWT_SECRET;
+if (!JWT_SECRET) {
+  throw new Error("JWT_SECRET environment variable is required");
+}
 
 await sql`
   CREATE TABLE IF NOT EXISTS users (
@@ -35,10 +43,25 @@ await sql`
   )
 `;
 
-const sessions = new Map<string, number>(); // token -> userId
+await sql`
+  CREATE TABLE IF NOT EXISTS trade_offers (
+    id SERIAL PRIMARY KEY,
+    requested_game_id INTEGER NOT NULL,
+    offered_game_id INTEGER NOT NULL,
+    offerer_id INTEGER NOT NULL,
+    recipient_id INTEGER NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('pending', 'accepted', 'rejected')),
+    created_at TIMESTAMP NOT NULL,
+    updated_at TIMESTAMP NOT NULL,
+    FOREIGN KEY (requested_game_id) REFERENCES games(id) ON DELETE CASCADE,
+    FOREIGN KEY (offered_game_id) REFERENCES games(id) ON DELETE CASCADE,
+    FOREIGN KEY (offerer_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (recipient_id) REFERENCES users(id) ON DELETE CASCADE
+  )
+`;
 
-function generateToken(): string {
-  return crypto.randomUUID();
+function generateToken(userId: number): string {
+  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: "7d" });
 }
 
 function authenticate(req: Request): number | null {
@@ -48,8 +71,12 @@ function authenticate(req: Request): number | null {
   }
 
   const token = authHeader.substring(7);
-  const userId = sessions.get(token);
-  return userId ?? null;
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as { userId: number };
+    return decoded.userId;
+  } catch (error) {
+    return null;
+  }
 }
 
 function requireAuth(req: Request): Response | number {
@@ -71,6 +98,16 @@ function createGameLinks(gameId: number, ownerId: number) {
   return {
     self: { href: `/games/${gameId}` },
     owner: { href: `/users/${ownerId}` },
+  };
+}
+
+function createTradeOfferLinks(offerId: number, requestedGameId: number, offeredGameId: number, offererId: number, recipientId: number) {
+  return {
+    self: { href: `/offers/${offerId}` },
+    requestedGame: { href: `/games/${requestedGameId}` },
+    offeredGame: { href: `/games/${offeredGameId}` },
+    offerer: { href: `/users/${offererId}` },
+    recipient: { href: `/users/${recipientId}` },
   };
 }
 
@@ -99,6 +136,20 @@ function formatGameResponse(game: any) {
     createdAt: game.created_at,
     updatedAt: game.updated_at,
     _links: createGameLinks(game.id, game.owner_id),
+  };
+}
+
+function formatTradeOfferResponse(offer: any) {
+  return {
+    id: offer.id,
+    requestedGameId: offer.requested_game_id,
+    offeredGameId: offer.offered_game_id,
+    offererId: offer.offerer_id,
+    recipientId: offer.recipient_id,
+    status: offer.status,
+    createdAt: offer.created_at,
+    updatedAt: offer.updated_at,
+    _links: createTradeOfferLinks(offer.id, offer.requested_game_id, offer.offered_game_id, offer.offerer_id, offer.recipient_id),
   };
 }
 
@@ -132,8 +183,7 @@ const server = Bun.serve({
             return errorResponse(401, "Invalid email or password");
           }
 
-          const token = generateToken();
-          sessions.set(token, user.id);
+          const token = generateToken(user.id);
 
           return Response.json({
             token,
@@ -151,11 +201,6 @@ const server = Bun.serve({
     },
     "/auth/logout": {
       POST: (req) => {
-        const authHeader = req.headers.get("Authorization");
-        if (authHeader && authHeader.startsWith("Bearer ")) {
-          const token = authHeader.substring(7);
-          sessions.delete(token);
-        }
         return Response.json({ message: "Logged out successfully" });
       },
     },
@@ -256,7 +301,7 @@ const server = Bun.serve({
           return errorResponse(400, "Invalid input");
         }
       },
-      DELETE: (req) => {
+      DELETE: async (req) => {
         const authResult = requireAuth(req);
         if (authResult instanceof Response) return authResult;
         const authenticatedUserId = authResult;
@@ -294,12 +339,12 @@ const server = Bun.serve({
 
         const games = await sql`
           SELECT * FROM games
-          WHERE (${nameParam} IS NULL OR name ILIKE ${nameParam})
-            AND (${publisherParam} IS NULL OR publisher = ${publisherParam})
-            AND (${yearParam} IS NULL OR year = ${yearParam})
-            AND (${gamingSystemParam} IS NULL OR gamingSystem = ${gamingSystemParam})
-            AND (${conditionParam} IS NULL OR condition = ${conditionParam})
-            AND (${ownerIdParam} IS NULL OR ownerId = ${ownerIdParam})
+          WHERE (${nameParam}::TEXT IS NULL OR name ILIKE ${nameParam})
+            AND (${publisherParam}::TEXT IS NULL OR publisher = ${publisherParam})
+            AND (${yearParam}::INTEGER IS NULL OR year = ${yearParam})
+            AND (${gamingSystemParam}::TEXT IS NULL OR gaming_system = ${gamingSystemParam})
+            AND (${conditionParam}::TEXT IS NULL OR condition = ${conditionParam})
+            AND (${ownerIdParam}::INTEGER IS NULL OR owner_id = ${ownerIdParam})
         `;
 
         return Response.json({
@@ -424,7 +469,7 @@ const server = Bun.serve({
             return errorResponse(400, validation.error.message);
           }
 
-          const updates: any = { updatedAt: new Date() };
+          const updates: any = { updated_at: new Date() };
 
           if (validation.data.name !== undefined) {
             updates.name = validation.data.name;
@@ -461,7 +506,7 @@ const server = Bun.serve({
           return errorResponse(400, "Invalid input");
         }
       },
-      DELETE: (req) => {
+      DELETE: async (req) => {
         const authResult = requireAuth(req);
         if (authResult instanceof Response) return authResult;
         const authenticatedUserId = authResult;
@@ -481,6 +526,143 @@ const server = Bun.serve({
 
         await sql`DELETE FROM games WHERE id = ${gameId}`;
         return new Response(null, { status: 204 });
+      },
+    },
+    "/offers": {
+      GET: async (req) => {
+        const authResult = requireAuth(req);
+        if (authResult instanceof Response) return authResult;
+
+        const url = new URL(req.url);
+        const params = url.searchParams;
+
+        const statusParam = params.has("status") ? params.get("status") : null;
+        const offererIdParam = params.has("offererId") ? parseInt(params.get("offererId")!) : null;
+        const recipientIdParam = params.has("recipientId") ? parseInt(params.get("recipientId")!) : null;
+
+        const offers = await sql`
+          SELECT * FROM trade_offers
+          WHERE (${statusParam}::TEXT IS NULL OR status = ${statusParam})
+            AND (${offererIdParam}::INTEGER IS NULL OR offerer_id = ${offererIdParam})
+            AND (${recipientIdParam}::INTEGER IS NULL OR recipient_id = ${recipientIdParam})
+          ORDER BY created_at DESC
+        `;
+
+        return Response.json({
+          offers: offers.map(formatTradeOfferResponse),
+          _links: {
+            self: { href: url.pathname + (url.search || "") },
+          },
+        });
+      },
+      POST: async (req) => {
+        const authResult = requireAuth(req);
+        if (authResult instanceof Response) return authResult;
+        const authenticatedUserId = authResult;
+
+        try {
+          const body: any = await req.json();
+
+          const validation = TradeOfferInputSchema.safeParse(body);
+          if (!validation.success) {
+            return errorResponse(400, validation.error.message);
+          }
+
+          const { requestedGameId, offeredGameId } = validation.data;
+
+          const requestedGames = await sql`SELECT * FROM games WHERE id = ${requestedGameId}`;
+          if (requestedGames.length === 0) {
+            return errorResponse(404, "Requested game not found");
+          }
+          const requestedGame = requestedGames[0];
+
+          const offeredGames = await sql`SELECT * FROM games WHERE id = ${offeredGameId}`;
+          if (offeredGames.length === 0) {
+            return errorResponse(404, "Offered game not found");
+          }
+          const offeredGame = offeredGames[0];
+
+          if (offeredGame.owner_id !== authenticatedUserId) {
+            return errorResponse(403, "Forbidden: You can only offer games you own");
+          }
+
+          if (requestedGame.owner_id === authenticatedUserId) {
+            return errorResponse(400, "Cannot create trade offer for your own game");
+          }
+
+          const now = new Date();
+
+          const result = await sql`
+            INSERT INTO trade_offers (requested_game_id, offered_game_id, offerer_id, recipient_id, status, created_at, updated_at)
+            VALUES (${requestedGameId}, ${offeredGameId}, ${authenticatedUserId}, ${requestedGame.owner_id}, 'pending', ${now}, ${now})
+            RETURNING *
+          `;
+
+          const offer = result[0];
+          return Response.json(formatTradeOfferResponse(offer), { status: 201 });
+        } catch (error) {
+          return errorResponse(400, "Invalid input");
+        }
+      },
+    },
+    "/offers/:id": {
+      GET: async (req) => {
+        const authResult = requireAuth(req);
+        if (authResult instanceof Response) return authResult;
+
+        const offerId = parseInt(req.params.id);
+        const offers = await sql`SELECT * FROM trade_offers WHERE id = ${offerId}`;
+
+        if (offers.length === 0) {
+          return errorResponse(404, "Trade offer not found");
+        }
+
+        return Response.json(formatTradeOfferResponse(offers[0]));
+      },
+      PATCH: async (req) => {
+        const authResult = requireAuth(req);
+        if (authResult instanceof Response) return authResult;
+        const authenticatedUserId = authResult;
+
+        try {
+          const offerId = parseInt(req.params.id);
+          const offers = await sql`SELECT * FROM trade_offers WHERE id = ${offerId}`;
+
+          if (offers.length === 0) {
+            return errorResponse(404, "Trade offer not found");
+          }
+
+          const offer = offers[0];
+
+          if (offer.recipient_id !== authenticatedUserId) {
+            return errorResponse(403, "Forbidden: Only the recipient can update this offer");
+          }
+
+          if (offer.status !== "pending") {
+            return errorResponse(400, "Only pending offers can be updated");
+          }
+
+          const body: any = await req.json();
+
+          const validation = TradeOfferUpdateSchema.safeParse(body);
+          if (!validation.success) {
+            return errorResponse(400, validation.error.message);
+          }
+
+          const { status } = validation.data;
+          const now = new Date();
+
+          const updatedOffers = await sql`
+            UPDATE trade_offers
+            SET status = ${status}, updated_at = ${now}
+            WHERE id = ${offerId}
+            RETURNING *
+          `;
+
+          return Response.json(formatTradeOfferResponse(updatedOffers[0]));
+        } catch (error) {
+          return errorResponse(400, "Invalid input");
+        }
       },
     },
   },

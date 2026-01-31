@@ -643,4 +643,253 @@ describe("Video Game Exchange API", () => {
 			expect(body._links.self.href).toContain("/games");
 		});
 	});
+
+	describe("Assignment: Multi-Node Deployment & Load Balancing", () => {
+		test("NGINX container routes requests to API services", async () => {
+			const { response } = await makeRequest("POST", "/users", {
+				body: {
+					name: "Load Balancer Test",
+					email: `loadbalancer-${Date.now()}@example.com`,
+					password: "test123",
+					streetAddress: "123 Test St",
+				},
+			});
+
+			expect(response.status).toBe(201);
+		});
+
+		test("Database persists data across API instances", async () => {
+			const email = `persist-test-${Date.now()}@example.com`;
+
+			const { body: user } = await makeRequest("POST", "/users", {
+				body: {
+					name: "Persistence Test",
+					email,
+					password: "test123",
+					streetAddress: "123 Persist St",
+				},
+			});
+
+			const { response: loginResponse, body: loginBody } = await makeRequest("POST", "/auth/login", {
+				body: { email, password: "test123" },
+			});
+
+			expect(loginResponse.status).toBe(200);
+			expect(loginBody.userId).toBe(user.id);
+		});
+	});
+
+	describe("Assignment: Trade Offers Feature", () => {
+		let user1Token: string;
+		let user1Id: number;
+		let user2Token: string;
+		let user2Id: number;
+		let user1GameId: number;
+		let user2GameId: number;
+
+		beforeAll(async () => {
+			const email1 = `trade-user1-${Date.now()}@example.com`;
+			const { body: user1Body } = await makeRequest("POST", "/users", {
+				body: {
+					name: "Trade User 1",
+					email: email1,
+					password: "pass123",
+					streetAddress: "111 Trade St",
+				},
+			});
+			user1Id = user1Body.id;
+
+			const { body: login1 } = await makeRequest("POST", "/auth/login", {
+				body: { email: email1, password: "pass123" },
+			});
+			user1Token = login1.token;
+
+			const email2 = `trade-user2-${Date.now()}@example.com`;
+			const { body: user2Body } = await makeRequest("POST", "/users", {
+				body: {
+					name: "Trade User 2",
+					email: email2,
+					password: "pass456",
+					streetAddress: "222 Trade St",
+				},
+			});
+			user2Id = user2Body.id;
+
+			const { body: login2 } = await makeRequest("POST", "/auth/login", {
+				body: { email: email2, password: "pass456" },
+			});
+			user2Token = login2.token;
+
+			const { body: game1Body } = await makeRequest("POST", "/games", {
+				body: {
+					name: "Zelda",
+					publisher: "Nintendo",
+					year: 1986,
+					gamingSystem: "NES",
+					condition: "mint",
+				},
+				token: user1Token,
+			});
+			user1GameId = game1Body.id;
+
+			const { body: game2Body } = await makeRequest("POST", "/games", {
+				body: {
+					name: "Metroid",
+					publisher: "Nintendo",
+					year: 1986,
+					gamingSystem: "NES",
+					condition: "good",
+				},
+				token: user2Token,
+			});
+			user2GameId = game2Body.id;
+		});
+
+		test("users can browse games owned by others", async () => {
+			const { response, body } = await makeRequest("GET", `/games?ownerId=${user2Id}`, {
+				token: user1Token,
+			});
+
+			expect(response.status).toBe(200);
+			expect(body.games.length).toBeGreaterThan(0);
+			expect(body.games[0].ownerId).toBe(user2Id);
+		});
+
+		test("user can create trade offer for another user's game", async () => {
+			const { response, body } = await makeRequest("POST", "/offers", {
+				body: {
+					requestedGameId: user2GameId,
+					offeredGameId: user1GameId,
+				},
+				token: user1Token,
+			});
+
+			expect(response.status).toBe(201);
+			expect(body.requestedGameId).toBe(user2GameId);
+			expect(body.offeredGameId).toBe(user1GameId);
+			expect(body.offererId).toBe(user1Id);
+			expect(body.recipientId).toBe(user2Id);
+			expect(body.status).toBe("pending");
+		});
+
+		test("game owner can view incoming offers", async () => {
+			const { body: offer } = await makeRequest("POST", "/offers", {
+				body: {
+					requestedGameId: user2GameId,
+					offeredGameId: user1GameId,
+				},
+				token: user1Token,
+			});
+
+			const { response, body } = await makeRequest("GET", `/offers?recipientId=${user2Id}`, {
+				token: user2Token,
+			});
+
+			expect(response.status).toBe(200);
+			expect(body.offers.length).toBeGreaterThan(0);
+			expect(body.offers.some((o: any) => o.id === offer.id)).toBe(true);
+		});
+
+		test("game owner can accept trade offer", async () => {
+			const { body: offer } = await makeRequest("POST", "/offers", {
+				body: {
+					requestedGameId: user2GameId,
+					offeredGameId: user1GameId,
+				},
+				token: user1Token,
+			});
+
+			const { response, body } = await makeRequest("PATCH", `/offers/${offer.id}`, {
+				body: { status: "accepted" },
+				token: user2Token,
+			});
+
+			expect(response.status).toBe(200);
+			expect(body.status).toBe("accepted");
+		});
+
+		test("game owner can reject trade offer", async () => {
+			const { body: offer } = await makeRequest("POST", "/offers", {
+				body: {
+					requestedGameId: user2GameId,
+					offeredGameId: user1GameId,
+				},
+				token: user1Token,
+			});
+
+			const { response, body } = await makeRequest("PATCH", `/offers/${offer.id}`, {
+				body: { status: "rejected" },
+				token: user2Token,
+			});
+
+			expect(response.status).toBe(200);
+			expect(body.status).toBe("rejected");
+		});
+
+		test("offers can be retrieved by status", async () => {
+			const { body: offer } = await makeRequest("POST", "/offers", {
+				body: {
+					requestedGameId: user2GameId,
+					offeredGameId: user1GameId,
+				},
+				token: user1Token,
+			});
+
+			await makeRequest("PATCH", `/offers/${offer.id}`, {
+				body: { status: "accepted" },
+				token: user2Token,
+			});
+
+			const { response, body } = await makeRequest("GET", "/offers?status=accepted", {
+				token: user1Token,
+			});
+
+			expect(response.status).toBe(200);
+			expect(body.offers.every((o: any) => o.status === "accepted")).toBe(true);
+		});
+
+		test("EXTRA CREDIT: only authorized recipient can update offer", async () => {
+			const { body: offer } = await makeRequest("POST", "/offers", {
+				body: {
+					requestedGameId: user2GameId,
+					offeredGameId: user1GameId,
+				},
+				token: user1Token,
+			});
+
+			const { response } = await makeRequest("PATCH", `/offers/${offer.id}`, {
+				body: { status: "accepted" },
+				token: user1Token,
+			});
+
+			expect(response.status).toBe(403);
+		});
+
+		test("only authenticated users can create trade offers", async () => {
+			const { response } = await makeRequest("POST", "/offers", {
+				body: {
+					requestedGameId: user2GameId,
+					offeredGameId: user1GameId,
+				},
+			});
+
+			expect(response.status).toBe(401);
+		});
+
+		test("only authenticated users can respond to trade offers", async () => {
+			const { body: offer } = await makeRequest("POST", "/offers", {
+				body: {
+					requestedGameId: user2GameId,
+					offeredGameId: user1GameId,
+				},
+				token: user1Token,
+			});
+
+			const { response } = await makeRequest("PATCH", `/offers/${offer.id}`, {
+				body: { status: "accepted" },
+			});
+
+			expect(response.status).toBe(401);
+		});
+	});
 });

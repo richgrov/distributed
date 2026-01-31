@@ -34,3 +34,12 @@ export const GamePatchSchema = z.object({
   condition: z.enum(["mint", "good", "fair", "poor"]).optional(),
   previousOwners: z.number().int().min(0).optional(),
 });
+
+export const TradeOfferInputSchema = z.object({
+  requestedGameId: z.number().int().min(1),
+  offeredGameId: z.number().int().min(1),
+});
+
+export const TradeOfferUpdateSchema = z.object({
+  status: z.enum(["accepted", "rejected"]),
+});
