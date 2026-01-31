@@ -61,7 +61,7 @@ await sql`
 `;
 
 function generateToken(userId: number): string {
-  return jwt.sign({ userId }, JWT_SECRET, { expiresIn: "7d" });
+  return jwt.sign({ userId }, JWT_SECRET!, { expiresIn: "7d" });
 }
 
 function authenticate(req: Request): number | null {
@@ -72,7 +72,7 @@ function authenticate(req: Request): number | null {
 
   const token = authHeader.substring(7);
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as { userId: number };
+    const decoded = jwt.verify(token, JWT_SECRET!) as { userId: number };
     return decoded.userId;
   } catch (error) {
     return null;
@@ -200,7 +200,7 @@ const server = Bun.serve({
       },
     },
     "/auth/logout": {
-      POST: (req) => {
+      POST: () => {
         return Response.json({ message: "Logged out successfully" });
       },
     },
