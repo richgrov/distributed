@@ -9,6 +9,8 @@ import {
   TradeOfferInputSchema,
   TradeOfferUpdateSchema,
 } from "./schemas";
+import { publishEmailEvent } from "./kafka-producer";
+import * as EmailTemplates from "./email-templates";
 
 const JWT_SECRET = process.env.JWT_SECRET;
 if (!JWT_SECRET) {
@@ -231,6 +233,8 @@ const server = Bun.serve({
           `;
 
           const user = result[0];
+          const emailBody = EmailTemplates.userWelcomeTemplate({ name: user.name, email: user.email });
+          publishEmailEvent(user.email, "Welcome to VidEX!", emailBody);
           return Response.json(formatUserResponse(user), { status: 201 });
         } catch (error) {
           return errorResponse(400, "Invalid input");
@@ -277,12 +281,17 @@ const server = Bun.serve({
           }
 
           const updates: any = { updated_at: new Date() };
+          let passwordChanged = false;
 
           if (validation.data.name !== undefined) {
             updates.name = validation.data.name;
           }
           if (validation.data.streetAddress !== undefined) {
             updates.street_address = validation.data.streetAddress;
+          }
+          if (validation.data.password !== undefined) {
+            updates.password = await Bun.password.hash(validation.data.password);
+            passwordChanged = true;
           }
 
           if (Object.keys(updates).length === 1) {
@@ -295,6 +304,11 @@ const server = Bun.serve({
             WHERE id = ${userId}
             RETURNING *
           `;
+
+          if (passwordChanged) {
+            const emailBody = EmailTemplates.passwordChangedTemplate({ name: updatedUsers[0].name, email: updatedUsers[0].email });
+            publishEmailEvent(updatedUsers[0].email, "Your VidEX password was changed", emailBody);
+          }
 
           return Response.json(formatUserResponse(updatedUsers[0]));
         } catch (error) {
@@ -599,6 +613,38 @@ const server = Bun.serve({
           `;
 
           const offer = result[0];
+
+          const offerers = await sql`SELECT name, email FROM users WHERE id = ${offer.offerer_id}`;
+          const recipients = await sql`SELECT name, email FROM users WHERE id = ${offer.recipient_id}`;
+
+          if (offerers.length > 0 && recipients.length > 0) {
+            publishEmailEvent(
+              recipients[0].email,
+              "You've received a trade offer!",
+              EmailTemplates.offerReceivedTemplate({
+                recipientName: recipients[0].name,
+                offererName: offerers[0].name,
+                offeredGameName: offeredGame.name,
+                offeredGameYear: offeredGame.year,
+                requestedGameName: requestedGame.name,
+                requestedGameYear: requestedGame.year,
+              })
+            );
+
+            publishEmailEvent(
+              offerers[0].email,
+              "Your trade offer has been sent!",
+              EmailTemplates.offerCreatedConfirmationTemplate({
+                offererName: offerers[0].name,
+                recipientName: recipients[0].name,
+                offeredGameName: offeredGame.name,
+                offeredGameYear: offeredGame.year,
+                requestedGameName: requestedGame.name,
+                requestedGameYear: requestedGame.year,
+              })
+            );
+          }
+
           return Response.json(formatTradeOfferResponse(offer), { status: 201 });
         } catch (error) {
           return errorResponse(400, "Invalid input");
@@ -652,14 +698,77 @@ const server = Bun.serve({
           const { status } = validation.data;
           const now = new Date();
 
-          const updatedOffers = await sql`
+          const updatedOffer = (await sql`
             UPDATE trade_offers
             SET status = ${status}, updated_at = ${now}
             WHERE id = ${offerId}
             RETURNING *
-          `;
+          `)[0];
 
-          return Response.json(formatTradeOfferResponse(updatedOffers[0]));
+          const offerers = await sql`SELECT name, email FROM users WHERE id = ${updatedOffer.offerer_id}`;
+          const recipients = await sql`SELECT name, email FROM users WHERE id = ${updatedOffer.recipient_id}`;
+          const requestedGames = await sql`SELECT name, year FROM games WHERE id = ${updatedOffer.requested_game_id}`;
+          const offeredGames = await sql`SELECT name, year FROM games WHERE id = ${updatedOffer.offered_game_id}`;
+
+          if (updatedOffer.status === "accepted") {
+            if (offerers.length > 0 && recipients.length > 0 && requestedGames.length > 0 && offeredGames.length > 0) {
+              publishEmailEvent(
+                offerers[0].email,
+                "Your trade offer was accepted!",
+                EmailTemplates.offerAcceptedTemplate({
+                  offererName: offerers[0].name,
+                  recipientName: recipients[0].name,
+                  offeredGameName: offeredGames[0].name,
+                  offeredGameYear: offeredGames[0].year,
+                  requestedGameName: requestedGames[0].name,
+                  requestedGameYear: requestedGames[0].year,
+                })
+              );
+
+              publishEmailEvent(
+                recipients[0].email,
+                "You accepted a trade offer!",
+                EmailTemplates.offerAcceptedRecipientTemplate({
+                  recipientName: recipients[0].name,
+                  offererName: offerers[0].name,
+                  offeredGameName: offeredGames[0].name,
+                  offeredGameYear: offeredGames[0].year,
+                  requestedGameName: requestedGames[0].name,
+                  requestedGameYear: requestedGames[0].year,
+                })
+              );
+            }
+          } else if (updatedOffer.status === "rejected") {
+            if (offerers.length > 0 && recipients.length > 0 && requestedGames.length > 0 && offeredGames.length > 0) {
+              publishEmailEvent(
+                offerers[0].email,
+                "Your trade offer was declined",
+                EmailTemplates.offerRejectedTemplate({
+                  offererName: offerers[0].name,
+                  recipientName: recipients[0].name,
+                  offeredGameName: offeredGames[0].name,
+                  offeredGameYear: offeredGames[0].year,
+                  requestedGameName: requestedGames[0].name,
+                  requestedGameYear: requestedGames[0].year,
+                })
+              );
+
+              publishEmailEvent(
+                recipients[0].email,
+                "You declined a trade offer",
+                EmailTemplates.offerRejectedRecipientTemplate({
+                  recipientName: recipients[0].name,
+                  offererName: offerers[0].name,
+                  offeredGameName: offeredGames[0].name,
+                  offeredGameYear: offeredGames[0].year,
+                  requestedGameName: requestedGames[0].name,
+                  requestedGameYear: requestedGames[0].year,
+                })
+              );
+            }
+          }
+
+          return Response.json(formatTradeOfferResponse(updatedOffer));
         } catch (error) {
           return errorResponse(400, "Invalid input");
         }

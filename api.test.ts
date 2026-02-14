@@ -3,12 +3,15 @@
 import { describe, test, expect, beforeAll } from "bun:test";
 
 const BASE_URL = "http://localhost:3001";
+const MAILHOG_API_URL = "http://mailhog:8025/api";
 
 interface TestContext {
 	user1Token: string;
 	user1Id: number;
+	user1Email: string;
 	user2Token: string;
 	user2Id: number;
+	user2Email: string;
 	game1Id: number;
 	game2Id: number;
 }
@@ -40,6 +43,34 @@ async function makeRequest(
 	return { response, body };
 }
 
+// Helper to get emails from MailHog
+async function getMailHogEmails(): Promise<any[]> {
+	const response = await fetch("http://localhost:8025/api/v2/messages");
+	if (!response.ok) throw new Error("Failed to fetch emails from MailHog");
+	const data = await response.json();
+	return data.items || [];
+}
+
+// Helper to find email by recipient
+async function findEmailByRecipient(email: string): Promise<any> {
+	const emails = await getMailHogEmails();
+	return emails.find((e: any) =>
+		(e.To && e.To.some((t: any) => t.Mailbox === email.split("@")[0] && t.Domain === email.split("@")[1])) ||
+		(e.Raw && e.Raw.To && e.Raw.To.some((t: string) => t.includes(email)))
+	);
+}
+
+// Helper to find email by recipient and subject
+async function findEmail(email: string, subject: string): Promise<any> {
+	const emails = await getMailHogEmails();
+	return emails.find((e: any) => {
+		const toMatch = (e.To && e.To.some((t: any) => t.Mailbox === email.split("@")[0] && t.Domain === email.split("@")[1])) ||
+			(e.Raw && e.Raw.To && e.Raw.To.some((t: string) => t.includes(email)));
+		const subjectMatch = e.Content && e.Content.Headers && e.Content.Headers.Subject && e.Content.Headers.Subject[0] === subject;
+		return toMatch && subjectMatch;
+	});
+}
+
 describe("Video Game Exchange API", () => {
 	let ctx: Partial<TestContext> = {};
 
@@ -67,6 +98,7 @@ describe("Video Game Exchange API", () => {
 			expect(body._links.games).toBeDefined();
 
 			ctx.user1Id = body.id;
+			ctx.user1Email = userData.email;
 			ctx.user1Token = ""; // Will be set after login
 		});
 
@@ -454,11 +486,13 @@ describe("Video Game Exchange API", () => {
 	describe("User Profile Management", () => {
 		let user1Token: string;
 		let user1Id: number;
+		let user1Email: string;
 		let user2Token: string;
 
 		beforeAll(async () => {
 			// Create user 1
 			const email1 = `profile1-${Date.now()}@example.com`;
+			user1Email = email1;
 			const { body: user1Body } = await makeRequest("POST", "/users", {
 				body: {
 					name: "Profile User 1",
@@ -527,6 +561,36 @@ describe("Video Game Exchange API", () => {
 			expect(response.status).toBe(200);
 			expect(body.id).toBe(user1Id);
 			expect(body._links).toBeDefined();
+		});
+
+		test("should allow user to change their password", async () => {
+			const newPassword = "newSecurePassword456";
+
+			// Update password
+			const { response } = await makeRequest("PATCH", `/users/${user1Id}`, {
+				body: { password: newPassword },
+				token: user1Token,
+			});
+
+			expect(response.status).toBe(200);
+
+			// Wait for password change event to be processed
+			await new Promise(resolve => setTimeout(resolve, 1500));
+
+			// Verify old password doesn't work
+			const { response: loginOldResponse } = await makeRequest("POST", "/auth/login", {
+				body: { email: user1Email, password: "pass123" },
+			});
+
+			expect(loginOldResponse.status).toBe(401);
+
+			// Verify new password works
+			const { response: loginNewResponse, body: loginBody } = await makeRequest("POST", "/auth/login", {
+				body: { email: user1Email, password: newPassword },
+			});
+
+			expect(loginNewResponse.status).toBe(200);
+			expect(loginBody.token).toBeDefined();
 		});
 	});
 
@@ -891,5 +955,223 @@ describe("Video Game Exchange API", () => {
 
 			expect(response.status).toBe(401);
 		});
+	});
+});
+
+describe("Kafka Event Publishing (Integration)", () => {
+	let testUser1Email: string;
+	let testUser1Id: number;
+	let testUser1Token: string;
+	let testUser2Email: string;
+	let testUser2Id: number;
+	let testUser2Token: string;
+	let testGame1Id: number;
+	let testGame2Id: number;
+
+	beforeAll(async () => {
+		// Create first test user
+		const user1Data = {
+			name: "Kafka Test User 1",
+			email: `kafka-user1-${Date.now()}@example.com`,
+			password: "kafka-pass-1",
+			streetAddress: "Kafka St 1",
+		};
+		testUser1Email = user1Data.email;
+
+		const { body: user1 } = await makeRequest("POST", "/users", {
+			body: user1Data,
+		});
+		testUser1Id = user1.id;
+
+		// Login to get token
+		const { body: loginResult1 } = await makeRequest("POST", "/auth/login", {
+			body: {
+				email: user1Data.email,
+				password: user1Data.password,
+			},
+		});
+		testUser1Token = loginResult1.token;
+
+		// Create second test user
+		const user2Data = {
+			name: "Kafka Test User 2",
+			email: `kafka-user2-${Date.now()}@example.com`,
+			password: "kafka-pass-2",
+			streetAddress: "Kafka St 2",
+		};
+		testUser2Email = user2Data.email;
+
+		const { body: user2 } = await makeRequest("POST", "/users", {
+			body: user2Data,
+		});
+		testUser2Id = user2.id;
+
+		// Login to get token
+		const { body: loginResult2 } = await makeRequest("POST", "/auth/login", {
+			body: {
+				email: user2Data.email,
+				password: user2Data.password,
+			},
+		});
+		testUser2Token = loginResult2.token;
+
+		// Create games
+		const { body: game1 } = await makeRequest("POST", "/games", {
+			body: {
+				name: "Super Mario 64",
+				publisher: "Nintendo",
+				year: 1996,
+				gamingSystem: "Nintendo 64",
+				condition: "mint",
+				previousOwners: 1,
+			},
+			token: testUser1Token,
+		});
+		testGame1Id = game1.id;
+
+		const { body: game2 } = await makeRequest("POST", "/games", {
+			body: {
+				name: "The Legend of Zelda: Ocarina of Time",
+				publisher: "Nintendo",
+				year: 1998,
+				gamingSystem: "Nintendo 64",
+				condition: "good",
+				previousOwners: 2,
+			},
+			token: testUser2Token,
+		});
+		testGame2Id = game2.id;
+
+		// Wait a bit for emails to be processed
+		await new Promise(resolve => setTimeout(resolve, 2000));
+	});
+
+	test("should publish user.created event when user registers", async () => {
+		const newUserEmail = `kafka-test-${Date.now()}@example.com`;
+
+		const { response } = await makeRequest("POST", "/users", {
+			body: {
+				name: "Test Kafka User",
+				email: newUserEmail,
+				password: "test-pass",
+				streetAddress: "Test St",
+			},
+		});
+
+		expect(response.status).toBe(201);
+
+		// Wait for event to be processed
+		await new Promise(resolve => setTimeout(resolve, 2000));
+
+		// Verify email was sent
+		const email = await findEmail(newUserEmail, "Welcome to VidEX!");
+		expect(email).toBeDefined();
+	});
+
+	test("should publish user.password_changed event when password is changed", async () => {
+		const newPassword = "kafka-pass-changed-" + Date.now();
+
+		const { response } = await makeRequest("PATCH", `/users/${testUser1Id}`, {
+			body: { password: newPassword },
+			token: testUser1Token,
+		});
+
+		expect(response.status).toBe(200);
+
+		// Wait for event to be processed
+		await new Promise(resolve => setTimeout(resolve, 2000));
+
+		// Update token for future tests if needed
+		const { body: loginRes } = await makeRequest("POST", "/auth/login", {
+			body: { email: testUser1Email, password: newPassword },
+		});
+		testUser1Token = loginRes.token;
+
+		// Verify email was sent
+		const email = await findEmail(testUser1Email, "Your VidEX password was changed");
+		expect(email).toBeDefined();
+	});
+
+	test("should publish offer.created event when trade offer is created", async () => {
+		const { response, body } = await makeRequest("POST", "/offers", {
+			body: {
+				requestedGameId: testGame2Id,
+				offeredGameId: testGame1Id,
+			},
+			token: testUser1Token,
+		});
+
+		expect(response.status).toBe(201);
+		expect(body.id).toBeDefined();
+		expect(body.status).toBe("pending");
+
+		// Wait for event to be processed
+		await new Promise(resolve => setTimeout(resolve, 2000));
+
+		// Verify recipient received email
+		const email = await findEmail(testUser2Email, "You've received a trade offer!");
+		expect(email).toBeDefined();
+	});
+
+	test("should publish offer.accepted event when offer is accepted", async () => {
+		// Create an offer first
+		const { body: offer } = await makeRequest("POST", "/offers", {
+			body: {
+				requestedGameId: testGame2Id,
+				offeredGameId: testGame1Id,
+			},
+			token: testUser1Token,
+		});
+
+		// Accept the offer
+		const { response, body } = await makeRequest(
+			"PATCH",
+			`/offers/${offer.id}`,
+			{
+				body: { status: "accepted" },
+				token: testUser2Token,
+			}
+		);
+
+		expect(response.status).toBe(200);
+		expect(body.status).toBe("accepted");
+
+		// Wait for event to be processed
+		await new Promise(resolve => setTimeout(resolve, 2000));
+
+		// Verify offerer received acceptance email
+		const email = await findEmail(testUser1Email, "Your trade offer was accepted!");
+		expect(email).toBeDefined();
+	});
+
+	test("should publish offer.rejected event when offer is rejected", async () => {
+		// Create an offer first
+		const { body: offer } = await makeRequest("POST", "/offers", {
+			body: {
+				requestedGameId: testGame2Id,
+				offeredGameId: testGame1Id,
+			},
+			token: testUser1Token,
+		});
+
+		// Reject the offer
+		const { response, body } = await makeRequest(
+			"PATCH",
+			`/offers/${offer.id}`,
+			{
+				body: { status: "rejected" },
+				token: testUser2Token,
+			}
+		);
+
+		expect(response.status).toBe(200);
+		expect(body.status).toBe("rejected");
+
+		// Wait for event to be processed
+		await new Promise(resolve => setTimeout(resolve, 2000));
+
+		// Verify offerer received rejection email
+		const email = await findEmail(testUser1Email, "Your trade offer was declined");
+		expect(email).toBeDefined();
 	});
 });

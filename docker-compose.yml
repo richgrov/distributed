@@ -8,23 +8,93 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U videx"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "1025"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   api1:
     build: .
     environment:
       DATABASE_URL: postgres://videx:videx@db:5432/videx
-      JWT_SECRET: ${JWT_SECRET:dev}
+      JWT_SECRET: ${JWT_SECRET:-dev}
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_CLIENT_ID: videx-api-1
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
     restart: unless-stopped
 
   api2:
     build: .
     environment:
       DATABASE_URL: postgres://videx:videx@db:5432/videx
-      JWT_SECRET: ${JWT_SECRET:dev}
+      JWT_SECRET: ${JWT_SECRET:-dev}
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_CLIENT_ID: videx-api-2
     depends_on:
-      - db
+      db:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  email-consumer:
+    build: ./email-consumer
+    environment:
+      KAFKA_BROKERS: kafka:9092
+      KAFKA_CLIENT_ID: videx-email-consumer
+      KAFKA_CONSUMER_GROUP_ID: videx-email-consumer-group
+      SMTP_HOST: mailhog
+      SMTP_PORT: 1025
+      SMTP_SECURE: "false"
+      SMTP_USER: ""
+      SMTP_PASSWORD: ""
+      EMAIL_FROM_ADDRESS: noreply@videx.local
+    depends_on:
+      kafka:
+        condition: service_healthy
+      mailhog:
+        condition: service_healthy
     restart: unless-stopped
 
   nginx:
@@ -40,3 +110,4 @@ services:
 
 volumes:
   postgres_data:
+  kafka_data:

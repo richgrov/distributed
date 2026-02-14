@@ -24,6 +24,7 @@ export const GameInputSchema = z.object({
 export const UserPatchSchema = z.object({
   name: z.string().min(1).optional(),
   streetAddress: z.string().min(1).optional(),
+  password: z.string().min(6).optional(),
 });
 
 export const GamePatchSchema = z.object({
